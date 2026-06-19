@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>대결! 품사 파이터!</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap" rel="stylesheet">
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getDatabase, ref, set, get, push, onValue, update, off } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDomZhNAiCExZHPertizHBvTakGWLIVqQA",
+  authDomain: "p-dca03.firebaseapp.com",
+  databaseURL: "https://p-dca03-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "p-dca03",
+  storageBucket: "p-dca03.firebasestorage.app",
+  messagingSenderId: "402792469582",
+  appId: "1:402792469582:web:44eb0acc0e7a2177d21f1f"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+const POS_LIST = ['명사','동사','형용사','부사','대명사','수사','관형사','감탄사','조사'];
+const POS_DESC = {
+  '명사':  '사람·사물·장소 등 이름을 나타내는 단어',
+  '동사':  '움직임이나 작용을 나타내는 단어 (-다로 끝남)',
+  '형용사':'성질이나 상태를 나타내는 단어 (-다로 끝남)',
+  '부사':  '동사·형용사를 꾸며주는 단어',
+  '대명사':'명사 대신 쓰는 단어 (나, 너, 이것 등)',
+  '수사':  '수량이나 순서를 나타내는 단어',
+  '관형사':'명사를 꾸며주는 단어 (새, 헌, 모든 등)',
+  '감탄사':'감정을 나타내는 단어 (아, 와, 어머 등)',
+  '조사':  '체언 뒤에 붙어 관계를 나타내는 단어',
+};
+const POS_EMOJI = {
+  '명사':'🏷️','동사':'⚡','형용사':'🎨','부사':'💨',
+  '대명사':'👉','수사':'🔢','관형사':'🔍','감탄사':'😲','조사':'🔗'
+};
+
+let state = {
+  mode:null, roomCode:null, playerName:null, playerId:null, listeners:[]
+};
+
+const $   = id => document.getElementById(id);
+const show = id => $(id) && $(id).classList.remove('hidden');
+const hide = id => $(id) && $(id).classList.add('hidden');
+const SCREENS = [
+  'scr-home','scr-t-setup','scr-t-lobby','scr-t-game','scr-t-result',
+  'scr-s-join','scr-s-wait','scr-s-battle','scr-s-appeal','scr-s-dead','scr-s-win'
+];
+
+function showScreen(id){ SCREENS.forEach(s=>hide(s)); show(id); window.scrollTo(0,0); }
+function genCode(){ return Math.random().toString(36).substring(2,7).toUpperCase(); }
+function genQR(url){ return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(url)}&color=ff2244&bgcolor=0a0a0f&margin=10`; }
+function getGameUrl(code){ return `${location.href.split('?')[0]}?room=${code}`; }
+function addListener(path,cb){ const r=ref(db,path); onValue(r,cb); state.listeners.push(r); }
+function clearListeners(){ state.listeners.forEach(r=>off(r)); state.listeners=[]; }
+
+function toast(msg, type=''){
+  const t=document.createElement('div');
+  t.className='toast'+(type?' toast-'+type:''); t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.classList.add('show'),10);
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),300); },2800);
+}
+
+// ═══════════════════════════════════════
+// 홈
+// ═══════════════════════════════════════
+window.goHome = function(){
+  clearListeners();
+  state={ mode:null,roomCode:null,playerName:null,playerId:null,listeners:[] };
+  showScreen('scr-home');
+};
+
+// ═══════════════════════════════════════
+// 교사: 설정
+// ═══════════════════════════════════════
+window.startTeacher = function(){
+  state.mode='teacher';
+  $('pos-selector').innerHTML = POS_LIST.map(p=>
+    `<button class="pos-btn" data-pos="${p}" onclick="selectPos('${p}')">
+      <span class="pb-icon">${POS_EMOJI[p]}</span>
+      <span class="pb-name">${p}</span>
+    </button>`
+  ).join('');
+  showScreen('scr-t-setup');
+};
+
+let selectedPos = null;
+window.selectPos = function(pos){
+  selectedPos = pos;
+  document.querySelectorAll('.pos-btn').forEach(b=>b.classList.toggle('sel', b.dataset.pos===pos));
+  $('pos-desc-box').textContent = `${POS_EMOJI[pos]} ${pos}: ${POS_DESC[pos]}`;
+  show('pos-desc-box');
+};
+
+window.createRoom = async function(){
+  if(!selectedPos){ toast('품사를 선택해주세요!','warn'); return; }
+  const kw = $('kw-input').value.trim();
+  if(!kw){ toast('제시어를 입력해주세요!','warn'); return; }
+
+  const btn=$('btn-create'); btn.textContent='만드는 중...'; btn.disabled=true;
+  const code=genCode(); state.roomCode=code;
+
+  await set(ref(db,`rooms/${code}`),{
+    status:'lobby', pos:selectedPos, keyword:kw,
+    createdAt:Date.now(), players:{}, answers:{}
+  });
+
+  $('t-room-code').textContent = code;
+  const url = getGameUrl(code);
+  $('t-qr-img').src = genQR(url);
+  $('t-join-url').textContent = url;
+  $('lobby-pos').textContent = `${POS_EMOJI[selectedPos]} ${selectedPos}`;
+  $('lobby-kw').textContent  = kw;
+
+  addListener(`rooms/${code}/players`, snap=>{
+    const p=snap.val()||{};
+    $('player-count').textContent = Object.keys(p).length+'명';
+    $('player-list').innerHTML = Object.values(p)
+      .map(pl=>`<div class="chip ${pl.alive===false?'chip-dead':''}">${pl.alive===false?'💀 ':''}${pl.name}</div>`)
+      .join('');
+  });
+
+  btn.textContent='🚀 방 만들기'; btn.disabled=false;
+  showScreen('scr-t-lobby');
+};
+
+window.startBattle = async function(){
+  const snap=await get(ref(db,`rooms/${state.roomCode}/players`));
+  if(!snap.exists()||Object.keys(snap.val()).length<1){ toast('최소 1명이 필요해요!','warn'); return; }
+  await update(ref(db,`rooms/${state.roomCode}`),{status:'battle', round:1});
+  showScreen('scr-t-game');
+  listenTeacher(state.roomCode);
+};
+
+// ═══════════════════════════════════════
+// 교사: 게임 진행
+// ═══════════════════════════════════════
+function listenTeacher(code){
+  addListener(`rooms/${code}`, snap=>{
+    const room=snap.val(); if(!room) return;
+    const players=room.players||{};
+    const answers =room.answers||{};
+    const alive=Object.values(players).filter(p=>p.alive!==false);
+
+    $('t-round').textContent   = `ROUND ${room.round||1}`;
+    $('t-pos').textContent     = `${POS_EMOJI[room.pos]||''} ${room.pos}`;
+    $('t-kw').textContent      = room.keyword;
+    $('t-alive').textContent   = `⚔️ 생존 ${alive.length}명`;
+
+    // 제출 현황
+    const submitted = Object.keys(answers).length;
+    const aliveIds  = Object.entries(players).filter(([,p])=>p.alive!==false).map(([id])=>id);
+    $('t-prog-bar').style.width = aliveIds.length ? `${(submitted/aliveIds.length)*100}%` : '0%';
+    $('t-prog-txt').textContent = `${submitted} / ${aliveIds.length}명 제출`;
+
+    // 답변 목록 — 선생님 판정 버튼 포함
+    $('t-answer-list').innerHTML = aliveIds.map(pid=>{
+      const p  = players[pid];
+      const a  = answers[pid];
+      if(!a) return `<div class="ans-row pending">
+        <span class="ar-name">${p?.name||'?'}</span>
+        <span class="ar-word waiting">대기 중...</span>
+      </div>`;
+
+      let statusHtml='';
+      if(a.status==='pass')
+        statusHtml=`<span class="judge-badge pass">✅ 통과</span>`;
+      else if(a.status==='hold' && !a.appeal)
+        statusHtml=`<span class="judge-badge hold">⏸ 소명 대기</span>`;
+      else if(a.status==='hold' && a.appeal)
+        statusHtml=`<div class="appeal-wrap">
+          <div class="appeal-bubble">"${a.appeal}"</div>
+          <div class="judge-btns" style="margin-top:6px">
+            <button class="jbtn jbtn-pass" onclick="judgeAppeal('${code}','${pid}','pass')">✅ 통과</button>
+            <button class="jbtn jbtn-fail" onclick="judgeAppeal('${code}','${pid}','fail')">💀 탈락</button>
+          </div>
+        </div>`;
+      else if(a.status==='fail')
+        statusHtml=`<span class="judge-badge fail">💀 탈락</span>`;
+      else
+        statusHtml=`<div class="judge-btns">
+          <button class="jbtn jbtn-pass" onclick="judge('${code}','${pid}','pass')">✅</button>
+          <button class="jbtn jbtn-hold" onclick="judge('${code}','${pid}','hold')">⏸</button>
+          <button class="jbtn jbtn-fail" onclick="judge('${code}','${pid}','fail')">💀</button>
+        </div>`;
+
+      return `<div class="ans-row ${a.status==='fail'?'row-fail':a.status==='pass'?'row-pass':a.status==='hold'?'row-hold':''}">
+        <span class="ar-name">${p?.name||'?'}</span>
+        <span class="ar-word">${a.answer}</span>
+        ${statusHtml}
+      </div>`;
+    }).join('') || '<div class="no-ans">아직 제출한 학생이 없어요</div>';
+
+    if(room.status==='gameover') showTeacherEnd(room);
+  });
+}
+
+window.judge = async function(code, pid, verdict){
+  await update(ref(db,`rooms/${code}/answers/${pid}`),{ status:verdict });
+  if(verdict==='fail'){
+    await update(ref(db,`rooms/${code}/players/${pid}`),{ alive:false });
+    // 생존자 체크
+    const snap=await get(ref(db,`rooms/${code}`));
+    const room=snap.val();
+    const players=room.players||{};
+    const alive=Object.entries(players).filter(([,p])=>p.alive!==false);
+    if(alive.length<=1){
+      await update(ref(db,`rooms/${code}`),{status:'gameover'});
+    }
+  }
+};
+
+window.judgeAppeal = async function(code, pid, verdict){
+  await update(ref(db,`rooms/${code}/answers/${pid}`),{ status:verdict });
+  if(verdict==='fail'){
+    await update(ref(db,`rooms/${code}/players/${pid}`),{ alive:false });
+    const snap=await get(ref(db,`rooms/${code}`));
+    const room=snap.val();
+    const players=room.players||{};
+    const alive=Object.entries(players).filter(([,p])=>p.alive!==false);
+    if(alive.length<=1) await update(ref(db,`rooms/${code}`),{status:'gameover'});
+  }
+};
+
+window.nextRound = async function(){
+  const snap=await get(ref(db,`rooms/${state.roomCode}`));
+  const room=snap.val(); if(!room) return;
+  // 생존자만 남기고 답변 초기화
+  await update(ref(db,`rooms/${state.roomCode}`),{
+    status:'battle', round:(room.round||1)+1, answers:null
+  });
+  toast(`라운드 ${(room.round||1)+1} 시작!`,'info');
+};
+
+window.endGame = async function(){
+  await update(ref(db,`rooms/${state.roomCode}`),{status:'gameover'});
+};
+
+function showTeacherEnd(room){
+  const players=room.players||{};
+  const winners=Object.values(players).filter(p=>p.alive!==false);
+  $('t-winners').innerHTML = winners.length
+    ? winners.map(p=>`<div class="winner-chip">🏆 ${p.name}</div>`).join('')
+    : '<div style="color:var(--muted)">모든 전사가 쓰러졌습니다...</div>';
+  showScreen('scr-t-result');
+}
+
+// ═══════════════════════════════════════
+// 학생: 입장
+// ═══════════════════════════════════════
+window.startStudent = function(){
+  state.mode='student';
+  const p=new URLSearchParams(location.search).get('room');
+  if(p) $('s-join-code').value=p;
+  showScreen('scr-s-join');
+};
+
+window.joinRoom = async function(){
+  const code=$('s-join-code').value.trim().toUpperCase();
+  const name=$('s-join-name').value.trim();
+  if(!code||!name){ toast('방 코드와 이름을 입력해주세요!','warn'); return; }
+
+  const snap=await get(ref(db,`rooms/${code}`));
+  if(!snap.exists()){ toast('존재하지 않는 방이에요!','warn'); return; }
+  if(snap.val().status!=='lobby'){ toast('이미 시작된 방이에요!','warn'); return; }
+
+  const pid=push(ref(db,`rooms/${code}/players`)).key;
+  await set(ref(db,`rooms/${code}/players/${pid}`),{ name, alive:true, joinedAt:Date.now() });
+
+  state.roomCode=code; state.playerName=name; state.playerId=pid;
+  $('s-wait-name').textContent=name;
+  showScreen('scr-s-wait');
+  listenStudent(code,pid);
+};
+
+// ═══════════════════════════════════════
+// 학생: 실시간 리스너
+// ═══════════════════════════════════════
+function listenStudent(code,pid){
+  addListener(`rooms/${code}`, snap=>{
+    const room=snap.val(); if(!room) return;
+    const me=room.players?.[pid];
+    const myAns=room.answers?.[pid];
+
+    // 탈락 처리
+    if(me?.alive===false){
+      $('dead-kw').textContent  = room.keyword;
+      $('dead-pos').textContent = `${POS_EMOJI[room.pos]||''}${room.pos}`;
+      showScreen('scr-s-dead');
+      return;
+    }
+
+    // 게임 종료
+    if(room.status==='gameover'){
+      const alive=Object.values(room.players||{}).filter(p=>p.alive!==false);
+      const iWin = me?.alive!==false;
+      $('s-win-icon').textContent = iWin?'🏆':'💀';
+      $('s-win-msg').textContent  = iWin?'최후의 파이터! 승리!':'아쉽지만 탈락...';
+      $('s-win-list').innerHTML   = alive.map(p=>`<div class="winner-chip">🏆 ${p.name}</div>`).join('')||'모두 탈락';
+      showScreen('scr-s-win');
+      return;
+    }
+
+    // 배틀 중
+    if(room.status==='battle'){
+      $('s-round').textContent   = `ROUND ${room.round||1}`;
+      $('s-pos').textContent     = `${POS_EMOJI[room.pos]||''} ${room.pos}`;
+      $('s-pos-desc').textContent= POS_DESC[room.pos]||'';
+      $('s-kw').textContent      = room.keyword;
+
+      // 다른 학생들 제출 현황 (단어는 안 보임 — 제출 여부만)
+      const players=room.players||{};
+      const answers=room.answers||{};
+      const aliveIds=Object.entries(players).filter(([,p])=>p.alive!==false);
+      $('s-others').innerHTML = aliveIds.map(([id,p])=>{
+        const submitted = !!answers[id];
+        const verdict   = answers[id]?.status;
+        let badge='';
+        if(verdict==='pass')      badge='<span class="mini-badge pass">✅</span>';
+        else if(verdict==='hold') badge='<span class="mini-badge hold">⏸</span>';
+        else if(verdict==='fail') badge='<span class="mini-badge fail">💀</span>';
+        else if(submitted)        badge='<span class="mini-badge sub">제출</span>';
+        else                      badge='<span class="mini-badge wait">대기</span>';
+        return `<div class="other-chip ${id===pid?'me':''}">${p.name} ${badge}</div>`;
+      }).join('');
+
+      if(!myAns){
+        // 아직 미제출
+        $('s-ans-input').value='';
+        $('s-ans-input').disabled=false;
+        $('s-submit-btn').disabled=false;
+        $('s-submit-btn').textContent='⚔️ 제출!';
+        $('s-verdict-box').className='verdict-box hidden';
+        showScreen('scr-s-battle');
+      } else {
+        // 제출 후 판정 대기/결과
+        $('s-ans-input').disabled=true;
+        $('s-submit-btn').disabled=true;
+        const vb=$('s-verdict-box');
+        vb.className='verdict-box';
+        show('s-verdict-box');
+
+        if(!myAns.status){
+          vb.className='verdict-box v-wait';
+          $('s-verdict-text').textContent='⏳ 선생님 판정 대기 중...';
+          $('s-submit-btn').textContent='제출 완료';
+        } else if(myAns.status==='pass'){
+          vb.className='verdict-box v-pass';
+          $('s-verdict-text').textContent='✅ 통과! 살아남았어요!';
+          $('s-submit-btn').textContent='✅ 통과!';
+        } else if(myAns.status==='hold'){
+          // 소명 미제출이면 소명 화면으로
+          if(!myAns.appeal){
+            $('appeal-word').textContent = myAns.answer;
+            $('appeal-reason').value='';
+            $('appeal-reason').disabled=false;
+            $('appeal-btn').disabled=false;
+            $('appeal-btn').textContent='📢 소명 제출!';
+            showScreen('scr-s-appeal');
+            return;
+          } else {
+            vb.className='verdict-box v-hold';
+            $('s-verdict-text').textContent='📢 소명 제출 완료 — 선생님 최종 판정 대기 중...';
+            $('s-submit-btn').textContent='⏸ 판정 대기';
+          }
+        }
+        showScreen('scr-s-battle');
+      }
+    }
+  });
+}
+
+window.submitAnswer = async function(){
+  const ans=$('s-ans-input').value.trim();
+  if(!ans){ toast('단어를 입력해주세요!','warn'); return; }
+  $('s-ans-input').disabled=true;
+  $('s-submit-btn').disabled=true;
+  $('s-submit-btn').textContent='제출 완료';
+  await set(ref(db,`rooms/${state.roomCode}/answers/${state.playerId}`),{
+    answer:ans, submittedAt:Date.now()
+  });
+};
+
+window.submitAppeal = async function(){
+  const reason=$('appeal-reason').value.trim();
+  if(!reason){ toast('소명 내용을 입력해주세요!','warn'); return; }
+  $('appeal-reason').disabled=true;
+  $('appeal-btn').disabled=true;
+  $('appeal-btn').textContent='제출 완료!';
+  await update(ref(db,`rooms/${state.roomCode}/answers/${state.playerId}`),{ appeal:reason });
+  toast('소명을 제출했어요! 선생님 판정을 기다려요.','info');
+};
+
+// ═══════════════════════════════════════
+// 초기화
+// ═══════════════════════════════════════
+window.addEventListener('DOMContentLoaded',()=>{
+  const room=new URLSearchParams(location.search).get('room');
+  room ? startStudent() : showScreen('scr-home');
+});
+</script>
+
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0f;--s1:#12121e;--s2:#1a1a2e;
+  --red:#ff2244;--orange:#ff6600;--yellow:#ffcc00;
+  --green:#00ff88;--blue:#4488ff;--hold:#bb88ff;
+  --text:#f0f0f0;--muted:#55556a;--border:rgba(255,255,255,0.07);
+  --r:14px;
+}
+html,body{min-height:100%;background:var(--bg);color:var(--text);font-family:'Noto Sans KR',sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(ellipse at 15% 0%,rgba(255,34,68,.13) 0%,transparent 50%),
+             radial-gradient(ellipse at 85% 100%,rgba(68,136,255,.09) 0%,transparent 50%)}
+.screen{position:relative;z-index:1;min-height:100vh;padding:20px 16px 56px;max-width:480px;margin:0 auto;display:flex;flex-direction:column}
+.hidden{display:none!important}
+
+/* ── 홈 타이틀 ── */
+.eyebrow{text-align:center;font-size:.72rem;color:var(--muted);letter-spacing:3px;text-transform:uppercase;margin-top:32px;margin-bottom:4px}
+.main-title{font-size:2.5rem;font-weight:900;text-align:center;line-height:1.1;color:#fff;letter-spacing:-1px}
+.fight{display:block;font-size:3rem;color:var(--red);text-shadow:0 0 28px rgba(255,34,68,.5)}
+.main-sub{text-align:center;color:var(--muted);font-size:.82rem;margin:6px 0 28px}
+.fire{font-size:3rem;text-align:center;margin:8px 0;animation:flicker 1.5s ease-in-out infinite alternate}
+@keyframes flicker{0%{transform:scale(1) rotate(-2deg)}100%{transform:scale(1.08) rotate(2deg)}}
+
+/* ── 카드 ── */
+.card{background:var(--s1);border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-bottom:12px}
+.card-red{border-color:rgba(255,34,68,.3);background:rgba(255,34,68,.05)}
+.card-blue{border-color:rgba(68,136,255,.25);background:rgba(68,136,255,.05)}
+.card-yellow{border-color:rgba(255,204,0,.25);background:rgba(255,204,0,.05)}
+
+/* ── 버튼 ── */
+.btn{width:100%;padding:15px;border:none;border-radius:12px;font-size:1rem;font-weight:700;font-family:inherit;cursor:pointer;transition:all .18s;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn:active{transform:scale(.97)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-red{background:linear-gradient(135deg,#ff2244,#ff6600);color:#fff;box-shadow:0 4px 18px rgba(255,34,68,.3)}
+.btn-blue{background:linear-gradient(135deg,#1144ff,#4488ff);color:#fff;box-shadow:0 4px 18px rgba(68,136,255,.25)}
+.btn-green{background:linear-gradient(135deg,#00aa55,#00ff88);color:#000;box-shadow:0 4px 18px rgba(0,255,136,.2)}
+.btn-yellow{background:linear-gradient(135deg,#cc8800,#ffcc00);color:#000;box-shadow:0 4px 18px rgba(255,204,0,.2)}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--muted)}
+
+/* ── 입력 ── */
+.lbl{font-size:.75rem;color:var(--muted);margin-bottom:6px;display:block;font-weight:700;letter-spacing:1px;text-transform:uppercase}
+.inp{width:100%;padding:13px 16px;background:var(--s2);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:1rem;font-family:inherit;outline:none;margin-bottom:12px;transition:border-color .2s}
+.inp:focus{border-color:var(--red)}
+.big-inp{font-size:1.8rem;font-weight:700;text-align:center;letter-spacing:3px;padding:16px;border:2px solid var(--border);border-radius:12px;background:var(--s2);color:var(--text);width:100%;font-family:inherit;outline:none;margin-bottom:12px;transition:border-color .2s}
+.big-inp:focus{border-color:var(--red);box-shadow:0 0 18px rgba(255,34,68,.15)}
+
+/* ── 품사 선택 ── */
+.pos-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.pos-btn{background:var(--s2);border:1px solid var(--border);border-radius:10px;padding:10px 6px;cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;gap:4px;transition:all .18s}
+.pos-btn.sel{border-color:var(--red);background:rgba(255,34,68,.12)}
+.pos-btn:active{transform:scale(.96)}
+.pb-icon{font-size:1.4rem}
+.pb-name{font-size:.8rem;font-weight:700;color:var(--text)}
+#pos-desc-box{font-size:.8rem;color:var(--muted);background:var(--s2);border-radius:8px;padding:10px 12px;margin-bottom:10px;line-height:1.6}
+
+/* ── 방 코드 ── */
+.room-code{font-size:3rem;font-weight:900;letter-spacing:10px;text-align:center;color:var(--red);text-shadow:0 0 20px rgba(255,34,68,.4);line-height:1;margin:10px 0}
+.qr-wrap{display:flex;flex-direction:column;align-items:center;gap:8px;background:rgba(255,255,255,.03);border:1px dashed var(--border);border-radius:12px;padding:16px}
+.qr-wrap img{width:180px;height:180px;border-radius:10px;border:2px solid var(--red)}
+.qr-url{font-size:.66rem;color:var(--muted);word-break:break-all;text-align:center}
+
+/* ── 플레이어 칩 ── */
+.chip{display:inline-flex;align-items:center;gap:4px;background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-size:.84rem;font-weight:700;margin:3px}
+.chip-dead{opacity:.35;border-color:transparent}
+#player-list{display:flex;flex-wrap:wrap;min-height:28px}
+
+/* ── 상단바 ── */
+.top-bar{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.top-bar h2{margin:0;font-size:1.15rem}
+.back-btn{background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:7px 12px;color:var(--muted);font-size:.84rem;cursor:pointer;font-family:inherit;font-weight:700;flex-shrink:0}
+.badge-pill{display:inline-block;background:rgba(255,34,68,.2);color:var(--red);border:1px solid rgba(255,34,68,.3);border-radius:99px;padding:2px 12px;font-size:.76rem;font-weight:700}
+
+/* ── 교사 HUD ── */
+.hud{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.hud-box{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:10px 14px}
+.hud-lbl{font-size:.68rem;color:var(--muted);letter-spacing:1px;margin-bottom:3px}
+.hud-val{font-size:1.1rem;font-weight:700}
+.hud-val.accent{color:var(--yellow);font-size:1.4rem}
+
+/* ── 진행바 ── */
+.prog-wrap{margin-bottom:12px}
+.prog-track{background:var(--s2);border-radius:99px;height:6px;overflow:hidden;margin-bottom:4px}
+.prog-fill{height:100%;background:linear-gradient(90deg,var(--red),var(--orange));border-radius:99px;transition:width .4s;width:0%}
+.prog-txt{font-size:.78rem;color:var(--muted);text-align:right}
+
+/* ── 교사 답변 목록 ── */
+.ans-row{display:flex;align-items:center;gap:8px;padding:11px 14px;border-radius:10px;background:var(--s2);border:1px solid var(--border);margin-bottom:6px;transition:all .2s}
+.ans-row.row-pass{border-color:rgba(0,255,136,.25);background:rgba(0,255,136,.06)}
+.ans-row.row-hold{border-color:rgba(187,136,255,.25);background:rgba(187,136,255,.06)}
+.ans-row.row-fail{border-color:rgba(255,34,68,.2);background:rgba(255,34,68,.05);opacity:.5}
+.ans-row.pending{opacity:.5}
+.ar-name{font-size:.84rem;font-weight:700;min-width:56px;flex-shrink:0}
+.ar-word{flex:1;font-size:1.1rem;font-weight:900;color:var(--yellow)}
+.ar-word.waiting{font-size:.84rem;color:var(--muted);font-weight:400}
+.no-ans{text-align:center;color:var(--muted);padding:20px;font-size:.88rem}
+
+/* ── 판정 버튼 ── */
+.judge-btns{display:flex;gap:6px;flex-shrink:0}
+.jbtn{border:none;border-radius:8px;padding:7px 12px;font-size:1rem;cursor:pointer;font-family:inherit;font-weight:700;transition:all .15s}
+.jbtn:active{transform:scale(.93)}
+.jbtn-pass{background:rgba(0,255,136,.18);color:var(--green)}
+.jbtn-hold{background:rgba(187,136,255,.18);color:var(--hold)}
+.jbtn-fail{background:rgba(255,34,68,.18);color:var(--red)}
+.jbtn-pass:hover{background:rgba(0,255,136,.3)}
+.jbtn-hold:hover{background:rgba(187,136,255,.3)}
+.jbtn-fail:hover{background:rgba(255,34,68,.3)}
+
+/* ── 판정 뱃지 ── */
+.judge-badge{padding:4px 12px;border-radius:99px;font-size:.78rem;font-weight:700;flex-shrink:0}
+.judge-badge.pass{background:rgba(0,255,136,.15);color:var(--green)}
+.judge-badge.hold{background:rgba(187,136,255,.15);color:var(--hold)}
+.judge-badge.fail{background:rgba(255,34,68,.15);color:var(--red)}
+
+/* ── 학생 배틀 화면 ── */
+.battle-top{text-align:center;padding:16px 0 18px}
+.round-tag{display:inline-block;background:linear-gradient(135deg,var(--red),var(--orange));color:#fff;font-size:.72rem;font-weight:700;padding:4px 16px;border-radius:99px;letter-spacing:2px;margin-bottom:12px}
+.s-pos{font-size:1.8rem;font-weight:900;margin-bottom:4px}
+.s-kw-lbl{font-size:.76rem;color:var(--muted);margin-bottom:4px}
+.s-kw{font-size:2.8rem;font-weight:900;color:var(--yellow);text-shadow:0 0 18px rgba(255,204,0,.3);letter-spacing:3px}
+.s-pos-hint{font-size:.78rem;color:var(--muted);background:var(--s2);border-radius:8px;padding:9px 12px;margin:10px 0 14px;line-height:1.6}
+
+/* ── 학생 현황 ── */
+.others-title{font-size:.72rem;color:var(--muted);letter-spacing:1px;margin-bottom:8px}
+#s-others{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.other-chip{display:inline-flex;align-items:center;gap:5px;background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:.8rem;font-weight:700}
+.other-chip.me{border-color:rgba(255,204,0,.4);color:var(--yellow)}
+.mini-badge{font-size:.7rem;padding:2px 7px;border-radius:99px;font-weight:700}
+.mini-badge.sub{background:rgba(68,136,255,.2);color:var(--blue)}
+.mini-badge.wait{background:rgba(255,255,255,.07);color:var(--muted)}
+.mini-badge.pass{background:rgba(0,255,136,.15);color:var(--green)}
+.mini-badge.hold{background:rgba(187,136,255,.15);color:var(--hold)}
+.mini-badge.fail{background:rgba(255,34,68,.15);color:var(--red)}
+
+/* ── 판정 결과 박스 ── */
+.verdict-box{border-radius:12px;padding:14px;text-align:center;margin-bottom:12px;font-weight:700;font-size:.95rem;transition:all .3s}
+.v-wait{background:rgba(255,204,0,.08);border:1px solid rgba(255,204,0,.2);color:var(--yellow)}
+.v-pass{background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.25);color:var(--green)}
+.v-hold{background:rgba(187,136,255,.08);border:1px solid rgba(187,136,255,.25);color:var(--hold)}
+
+/* ── 대기/탈락/승리 ── */
+.center-screen{text-align:center;padding-top:60px}
+.big-icon{font-size:5rem;margin-bottom:12px}
+.pulse{animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+.skull{animation:shake .5s ease-in-out 3}
+@keyframes shake{0%,100%{transform:rotate(0)}25%{transform:rotate(-8deg)}75%{transform:rotate(8deg)}}
+.winner-chip{display:inline-block;background:linear-gradient(135deg,var(--orange),var(--yellow));color:#000;border-radius:10px;padding:8px 18px;font-size:1rem;font-weight:700;margin:4px}
+
+/* ── 정보 행 ── */
+.info-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:.88rem}
+.info-row:last-child{border-bottom:none}
+.info-key{color:var(--muted)}
+
+/* ── 스크롤 ── */
+.scroll{overflow-y:auto;max-height:52vh}
+
+/* ── 소명 ── */
+.appeal-wrap{display:flex;flex-direction:column;gap:0;flex:1}
+.appeal-bubble{background:rgba(187,136,255,.12);border:1px solid rgba(187,136,255,.3);border-radius:10px;padding:8px 12px;font-size:.88rem;color:var(--hold);line-height:1.5;margin-bottom:0}
+.appeal-screen-top{text-align:center;padding:24px 0 16px}
+.appeal-word-big{font-size:2rem;font-weight:900;color:var(--yellow);margin:10px 0 4px}
+.appeal-desc{font-size:.82rem;color:var(--muted);line-height:1.6}
+
+/* ── 토스트 ── */
+.toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--s1);border:1px solid var(--border);color:var(--text);padding:10px 22px;border-radius:24px;font-size:.86rem;font-weight:700;opacity:0;transition:all .3s;white-space:nowrap;z-index:9999}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.toast-warn{border-color:rgba(255,204,0,.4);color:var(--yellow)}
+.toast.toast-info{border-color:rgba(68,136,255,.4);color:var(--blue)}
+
+hr.div{border:none;border-top:1px solid var(--border);margin:12px 0}
+</style>
+</head>
+<body>
+
+<!-- ══════ 홈 ══════ -->
+<div id="scr-home" class="screen">
+  <div class="eyebrow">류봉두와 함께하는 국어수업</div>
+  <div class="fire">🔥</div>
+  <div class="main-title">대결!<span class="fight">품사 파이터!</span></div>
+  <div class="main-sub">품사를 알아야 살아남는다</div>
+  <button class="btn btn-red" onclick="startTeacher()">👩‍🏫 선생님 — 방 만들기</button>
+  <button class="btn btn-blue" onclick="startStudent()">⚔️ 학생 — 전투 참가</button>
+  <div class="card" style="text-align:center;margin-top:8px">
+    <div style="font-size:.8rem;color:var(--muted);line-height:1.9">
+      선생님이 품사와 제시어를 정해요<br>
+      해당 품사에 맞는 단어를 입력하면 생존<br>
+      선생님이 실시간으로 통과·보류·탈락 판정
+    </div>
+  </div>
+</div>
+
+<!-- ══════ 교사: 설정 ══════ -->
+<div id="scr-t-setup" class="screen hidden">
+  <div class="top-bar">
+    <button class="back-btn" onclick="goHome()">← 뒤로</button>
+    <h2>⚔️ 전투 설정</h2>
+  </div>
+  <div class="card">
+    <div class="lbl">🎯 오늘의 품사 선택</div>
+    <div class="pos-grid" id="pos-selector"></div>
+    <div id="pos-desc-box" class="hidden"></div>
+  </div>
+  <div class="card">
+    <label class="lbl">📢 제시어 입력</label>
+    <input id="kw-input" class="inp" placeholder="예: 학교, 여름, 바다..." maxlength="10">
+    <div style="font-size:.76rem;color:var(--muted)">학생들은 이 단어와 관련된 단어를 해당 품사로 입력해요</div>
+  </div>
+  <button id="btn-create" class="btn btn-red" onclick="createRoom()">🚪 방 만들기</button>
+  <button class="btn btn-ghost" onclick="goHome()">취소</button>
+</div>
+
+<!-- ══════ 교사: 로비 ══════ -->
+<div id="scr-t-lobby" class="screen hidden">
+  <div class="top-bar">
+    <button class="back-btn" onclick="goHome()">← 종료</button>
+    <h2>⏳ 대기실</h2>
+  </div>
+  <div class="card" style="text-align:center">
+    <div style="font-size:.76rem;color:var(--muted);margin-bottom:4px">방 코드</div>
+    <div class="room-code" id="t-room-code">-----</div>
+  </div>
+  <div class="card">
+    <div class="qr-wrap">
+      <img id="t-qr-img" src="" alt="QR">
+      <div class="qr-url" id="t-join-url"></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="info-row"><span class="info-key">품사</span><span id="lobby-pos" style="font-weight:700"></span></div>
+    <div class="info-row"><span class="info-key">제시어</span><span id="lobby-kw" style="color:var(--yellow);font-weight:700"></span></div>
+    <div class="info-row"><span class="info-key">참가자</span><span class="badge-pill" id="player-count">0명</span></div>
+  </div>
+  <div id="player-list" style="margin-bottom:12px"></div>
+  <button class="btn btn-red" onclick="startBattle()">⚔️ 전투 시작!</button>
+</div>
+
+<!-- ══════ 교사: 게임 진행 ══════ -->
+<div id="scr-t-game" class="screen hidden">
+  <div class="top-bar">
+    <button class="back-btn" onclick="goHome()">← 종료</button>
+    <h2 id="t-round">ROUND 1</h2>
+    <span class="badge-pill" id="t-alive"></span>
+  </div>
+
+  <div class="hud">
+    <div class="hud-box">
+      <div class="hud-lbl">품사</div>
+      <div class="hud-val" id="t-pos"></div>
+    </div>
+    <div class="hud-box">
+      <div class="hud-lbl">제시어</div>
+      <div class="hud-val accent" id="t-kw"></div>
+    </div>
+  </div>
+
+  <div class="prog-wrap">
+    <div class="prog-track"><div class="prog-fill" id="t-prog-bar"></div></div>
+    <div class="prog-txt" id="t-prog-txt">0 / 0명 제출</div>
+  </div>
+
+  <!-- 판정 가이드 -->
+  <div class="card card-yellow" style="font-size:.8rem;line-height:1.8;margin-bottom:10px">
+    <b>판정 기준</b><br>
+    ✅ <b>통과</b> — 품사·제시어 모두 맞음<br>
+    ⏸ <b>보류</b> — 애매함, 구두로 이유 물어보기<br>
+    💀 <b>탈락</b> — 품사 틀림 또는 제시어와 무관
+  </div>
+
+  <div class="card scroll" id="t-answer-list">
+    <div class="no-ans">학생들이 답변 중...</div>
+  </div>
+
+  <button class="btn btn-yellow" onclick="nextRound()" style="margin-top:8px">▶ 다음 라운드</button>
+  <button class="btn btn-ghost" onclick="endGame()" style="margin-top:0">🏁 게임 종료</button>
+</div>
+
+<!-- ══════ 교사: 최종 결과 ══════ -->
+<div id="scr-t-result" class="screen hidden">
+  <div style="text-align:center;padding:36px 0 20px">
+    <div style="font-size:3.5rem;margin-bottom:12px">🏆</div>
+    <div style="font-size:1.8rem;font-weight:900;margin-bottom:16px">최후의 파이터!</div>
+    <div id="t-winners"></div>
+  </div>
+  <button class="btn btn-red" style="margin-top:24px" onclick="goHome()">🏠 홈으로</button>
+</div>
+
+<!-- ══════ 학생: 입장 ══════ -->
+<div id="scr-s-join" class="screen hidden">
+  <div style="margin-top:24px;text-align:center">
+    <div class="fire">⚔️</div>
+    <div class="main-title" style="font-size:2rem">대결!<span class="fight" style="font-size:2.2rem">품사 파이터!</span></div>
+  </div>
+  <div class="card" style="margin-top:20px">
+    <label class="lbl">방 코드</label>
+    <input id="s-join-code" class="inp" placeholder="예: AB1C2" maxlength="5"
+      style="text-transform:uppercase;letter-spacing:6px;font-size:1.5rem;font-weight:900;text-align:center">
+    <label class="lbl">전사 이름</label>
+    <input id="s-join-name" class="inp" placeholder="이름 입력" maxlength="8">
+  </div>
+  <button class="btn btn-red" onclick="joinRoom()">⚔️ 전투 참가!</button>
+  <button class="btn btn-ghost" onclick="goHome()">← 뒤로</button>
+</div>
+
+<!-- ══════ 학생: 대기 ══════ -->
+<div id="scr-s-wait" class="screen hidden">
+  <div class="center-screen">
+    <div class="big-icon pulse">⚔️</div>
+    <div style="font-size:1.3rem;font-weight:700;margin:14px 0 8px"><span id="s-wait-name"></span> 전사!</div>
+    <div style="color:var(--muted);font-size:.9rem">선생님이 전투를 시작하길 기다리는 중...</div>
+    <div class="card card-red" style="margin-top:32px;text-align:left">
+      <div style="font-size:.84rem;line-height:1.9">
+        ⚔️ <b>전투 규칙</b><br>
+        선생님이 품사와 제시어를 정해요<br>
+        제시어와 관련된 단어를 해당 품사로 입력!<br>
+        선생님이 직접 통과·보류·탈락 판정해요<br>
+        보류면 선생님이 이유를 구두로 물어봐요<br>
+        마지막까지 살아남은 자가 승리! 🏆
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ 학생: 배틀 ══════ -->
+<div id="scr-s-battle" class="screen hidden">
+  <div class="battle-top">
+    <div class="round-tag" id="s-round">ROUND 1</div>
+    <div class="s-pos" id="s-pos">🏷️ 명사</div>
+    <div class="s-kw-lbl">제시어</div>
+    <div class="s-kw" id="s-kw">학교</div>
+  </div>
+
+  <div class="s-pos-hint" id="s-pos-desc"></div>
+
+  <!-- 다른 학생 현황 -->
+  <div class="others-title">전사 현황</div>
+  <div id="s-others"></div>
+
+  <!-- 판정 결과 -->
+  <div id="s-verdict-box" class="verdict-box hidden">
+    <div id="s-verdict-text"></div>
+  </div>
+
+  <input id="s-ans-input" class="big-inp" placeholder="단어 입력..." maxlength="15">
+  <button id="s-submit-btn" class="btn btn-red" onclick="submitAnswer()">⚔️ 제출!</button>
+</div>
+
+<!-- ══════ 학생: 소명 ══════ -->
+<div id="scr-s-appeal" class="screen hidden">
+  <div class="appeal-screen-top">
+    <div style="font-size:2.2rem;margin-bottom:8px">⚖️</div>
+    <div style="font-size:1.2rem;font-weight:900;color:var(--hold)">보류 판정!</div>
+    <div style="font-size:.84rem;color:var(--muted);margin-top:6px">선생님이 이 단어가 왜 답에 어울리는지 물어보고 있어요</div>
+  </div>
+
+  <div class="card" style="border-color:rgba(187,136,255,.3);background:rgba(187,136,255,.06);text-align:center">
+    <div style="font-size:.76rem;color:var(--muted);margin-bottom:4px">내가 입력한 단어</div>
+    <div class="appeal-word-big" id="appeal-word"></div>
+    <div class="appeal-desc">이 단어가 왜 제시어와 관련 있고<br>해당 품사에 맞는지 설명해보세요!</div>
+  </div>
+
+  <div class="card">
+    <label class="lbl">📢 소명 내용</label>
+    <textarea id="appeal-reason"
+      style="width:100%;padding:13px 16px;background:var(--s2);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:.95rem;font-family:inherit;outline:none;resize:none;min-height:100px;line-height:1.7;transition:border-color .2s"
+      placeholder="예) '학교'하면 가장 먼저 떠오르는 공간이 '교실'이고, 이것은 장소를 나타내는 명사입니다..."
+      maxlength="150"
+      onfocus="this.style.borderColor='var(--hold)'"
+      onblur="this.style.borderColor='var(--border)'"></textarea>
+    <div style="font-size:.72rem;color:var(--muted);margin-top:4px;text-align:right">최대 150자</div>
+  </div>
+
+  <button id="appeal-btn" class="btn btn-hold" onclick="submitAppeal()" style="background:linear-gradient(135deg,#7744cc,#bb88ff);color:#fff;box-shadow:0 4px 18px rgba(187,136,255,.25)">
+    📢 소명 제출!
+  </button>
+
+  <div class="card card-red" style="font-size:.8rem;line-height:1.8;margin-top:4px">
+    ⚠️ 소명은 <b>1번만</b> 제출할 수 있어요<br>
+    선생님이 소명 내용을 보고 최종 통과/탈락을 결정해요
+  </div>
+</div>
+
+<!-- ══════ 학생: 탈락 ══════ -->
+<div id="scr-s-dead" class="screen hidden">
+  <div class="center-screen">
+    <div class="big-icon skull">💀</div>
+    <div style="font-size:1.8rem;font-weight:900;color:var(--red);margin:14px 0 8px">탈락!</div>
+    <div style="color:var(--muted);font-size:.9rem;margin-bottom:24px">전투에서 쓰러졌어요</div>
+    <div class="card" style="text-align:left">
+      <div class="info-row"><span class="info-key">제시어</span><span id="dead-kw" style="color:var(--yellow);font-weight:700"></span></div>
+      <div class="info-row"><span class="info-key">요구 품사</span><span id="dead-pos" style="font-weight:700"></span></div>
+    </div>
+    <div class="card card-red" style="font-size:.84rem;line-height:1.8;margin-top:8px;text-align:left">
+      다음엔 반드시 살아남자! 💪<br>
+      친구들의 전투를 관전하며 품사를 복습해요 📚
+    </div>
+    <button class="btn btn-ghost" style="margin-top:16px" onclick="goHome()">🏠 홈으로</button>
+  </div>
+</div>
+
+<!-- ══════ 학생: 승리/종료 ══════ -->
+<div id="scr-s-win" class="screen hidden">
+  <div style="text-align:center;padding:44px 0 20px">
+    <div style="font-size:4rem;margin-bottom:12px" id="s-win-icon">🏆</div>
+    <div style="font-size:1.5rem;font-weight:900;margin-bottom:6px" id="s-win-msg"></div>
+    <div style="color:var(--muted);font-size:.84rem;margin-bottom:24px">최후의 파이터</div>
+    <div id="s-win-list"></div>
+  </div>
+  <button class="btn btn-ghost" style="margin-top:16px" onclick="goHome()">🏠 홈으로</button>
+</div>
+
+</body>
+</html>
