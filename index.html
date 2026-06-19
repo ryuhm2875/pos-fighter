@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>대결! 품사 파이터!</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getDatabase, ref, set, get, push, onValue, update, off, remove } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDomZhNAiCExZHPertizHBvTakGWLIVqQA",
+  authDomain: "p-dca03.firebaseapp.com",
+  databaseURL: "https://p-dca03-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "p-dca03",
+  storageBucket: "p-dca03.firebasestorage.app",
+  messagingSenderId: "402792469582",
+  appId: "1:402792469582:web:44eb0acc0e7a2177d21f1f"
+};
+
+const GEMINI_KEY = "AIzaSyAQ-Ab8RN6K3b0KahoVIraQEbdk8ZljGaQTW558WOBRT2tBlgd6ASg";
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+// ── 상수 ──────────────────────────────────────────────
+const POS_LIST = ['명사','동사','형용사','부사','대명사','수사','관형사','감탄사','조사'];
+const POS_DESC = {
+  '명사':  '사람·사물·장소 등 이름을 나타내는 단어',
+  '동사':  '움직임이나 작용을 나타내는 단어 (-다로 끝남)',
+  '형용사':'성질이나 상태를 나타내는 단어 (-다로 끝남)',
+  '부사':  '동사·형용사·다른 부사를 꾸며주는 단어',
+  '대명사':'명사 대신 쓰는 단어 (나, 너, 이것 등)',
+  '수사':  '수량이나 순서를 나타내는 단어',
+  '관형사':'명사를 꾸며주는 단어 (새, 헌, 모든 등)',
+  '감탄사':'감정을 나타내는 단어 (아, 와, 어머 등)',
+  '조사':  '체언 뒤에 붙어 관계를 나타내는 단어',
+};
+const POS_EMOJI = {
+  '명사':'🏷️','동사':'⚡','형용사':'🎨','부사':'💨',
+  '대명사':'👉','수사':'🔢','관형사':'🔍','감탄사':'😲','조사':'🔗'
+};
+
+// ── 상태 ──────────────────────────────────────────────
+let state = {
+  mode: null, roomCode: null,
+  playerName: null, playerId: null,
+  listeners: [], currentPos: null,
+  pendingJudge: false,
+};
+
+// ── DOM ───────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const show = id => $(id) && $(id).classList.remove('hidden');
+const hide = id => $(id) && $(id).classList.add('hidden');
+const SCREENS = [
+  'scr-home','scr-t-setup','scr-t-lobby','scr-t-game',
+  'scr-t-result','scr-s-join','scr-s-wait','scr-s-battle',
+  'scr-s-question','scr-s-dead','scr-s-result'
+];
+
+function showScreen(id) {
+  SCREENS.forEach(s => hide(s));
+  show(id);
+  window.scrollTo(0,0);
+}
+
+function shuffle(arr){ return [...arr].sort(()=>Math.random()-0.5); }
+function genCode(){ return Math.random().toString(36).substring(2,7).toUpperCase(); }
+function genQR(url){ return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(url)}&color=ff4444&bgcolor=0a0a0a&margin=10`; }
+function getGameUrl(code){ return `${location.href.split('?')[0]}?room=${code}`; }
+
+function addListener(path,cb){
+  const r=ref(db,path); onValue(r,cb); state.listeners.push(r);
+}
+function clearListeners(){ state.listeners.forEach(r=>off(r)); state.listeners=[]; }
+
+// ── 토스트 ────────────────────────────────────────────
+function toast(msg, type='info'){
+  const t=document.createElement('div');
+  t.className=`toast toast-${type}`; t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.classList.add('show'),10);
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),300); },3000);
+}
+
+// ── 홈 ───────────────────────────────────────────────
+window.goHome = function(){
+  clearListeners();
+  state={ mode:null,roomCode:null,playerName:null,playerId:null,listeners:[],currentPos:null,pendingJudge:false };
+  showScreen('scr-home');
+};
+
+// ── 교사: 방 설정 ─────────────────────────────────────
+window.startTeacher = function(){
+  state.mode='teacher';
+  // 품사 버튼 렌더링
+  $('pos-selector').innerHTML = POS_LIST.map(p=>
+    `<button class="pos-btn" data-pos="${p}" onclick="selectPos('${p}')">
+      <span class="pos-btn-icon">${POS_EMOJI[p]}</span>
+      <span class="pos-btn-name">${p}</span>
+    </button>`
+  ).join('');
+  showScreen('scr-t-setup');
+};
+
+let selectedPos = null;
+window.selectPos = function(pos){
+  selectedPos = pos;
+  document.querySelectorAll('.pos-btn').forEach(b=>{
+    b.classList.toggle('selected', b.dataset.pos===pos);
+  });
+  $('pos-desc-box').textContent = `${POS_EMOJI[pos]} ${pos}: ${POS_DESC[pos]}`;
+  show('pos-desc-box');
+};
+
+window.createRoom = async function(){
+  if(!selectedPos){ toast('품사를 선택해주세요!','warn'); return; }
+  const keyword = $('keyword-input').value.trim();
+  if(!keyword){ toast('제시어를 입력해주세요!','warn'); return; }
+
+  const btn=$('btn-create'); btn.textContent='방 만드는 중...'; btn.disabled=true;
+  const roomCode=genCode(); state.roomCode=roomCode;
+
+  await set(ref(db,`rooms/${roomCode}`),{
+    status:'lobby', pos:selectedPos, keyword,
+    createdAt:Date.now(), players:{}, answers:{},
+  });
+
+  $('room-code-display').textContent=roomCode;
+  const url=getGameUrl(roomCode);
+  $('qr-img').src=genQR(url);
+  $('join-url').textContent=url;
+  $('lobby-pos').textContent=`${POS_EMOJI[selectedPos]} ${selectedPos}`;
+  $('lobby-keyword').textContent=keyword;
+
+  addListener(`rooms/${roomCode}/players`, snap=>{
+    const p=snap.val()||{};
+    $('player-count').textContent=Object.keys(p).length;
+    $('player-list').innerHTML=Object.values(p)
+      .map(pl=>`<div class="fighter-chip ${pl.alive===false?'dead':''}">${pl.alive===false?'💀 ':''}<span>${pl.name}</span></div>`)
+      .join('');
+  });
+
+  btn.textContent='🚀 방 만들기'; btn.disabled=false;
+  showScreen('scr-t-lobby');
+};
+
+window.startBattle = async function(){
+  const snap=await get(ref(db,`rooms/${state.roomCode}/players`));
+  const players=snap.val()||{};
+  if(Object.keys(players).length<1){ toast('최소 1명이 필요해요!','warn'); return; }
+
+  await update(ref(db,`rooms/${state.roomCode}`),{status:'battle', round:1});
+  showScreen('scr-t-game');
+  listenTeacherGame(state.roomCode);
+};
+
+function listenTeacherGame(code){
+  addListener(`rooms/${code}`, snap=>{
+    const room=snap.val(); if(!room) return;
+    const players=room.players||{};
+    const answers=room.answers||{};
+    const allAlive=Object.entries(players).filter(([,p])=>p.alive!==false);
+    const answered=Object.keys(answers).length;
+
+    $('t-pos-display').textContent=`${POS_EMOJI[room.pos]} ${room.pos}`;
+    $('t-keyword-display').textContent=room.keyword;
+    $('t-round-display').textContent=`라운드 ${room.round||1}`;
+    $('t-alive-count').textContent=`생존자 ${allAlive.length}명`;
+    $('t-ans-progress').textContent=`${answered} / ${allAlive.length}명 제출`;
+    $('t-ans-bar').style.width=`${allAlive.length>0?(answered/allAlive.length)*100:0}%`;
+
+    // 판정 결과 목록
+    const resultHtml=Object.entries(answers).map(([pid,a])=>{
+      const p=players[pid];
+      let statusHtml='';
+      if(a.status==='judging') statusHtml='<span class="judge-status judging">판정 중...</span>';
+      else if(a.status==='alive') statusHtml='<span class="judge-status alive">✅ 생존</span>';
+      else if(a.status==='questioning') statusHtml='<span class="judge-status questioning">❓ 재질문 중</span>';
+      else if(a.status==='dead') statusHtml='<span class="judge-status dead">💀 탈락</span>';
+      return `<div class="answer-item ${a.status==='dead'?'dead-row':''}">
+        <span class="ans-name">${p?.name||'?'}</span>
+        <span class="ans-word">"${a.answer}"</span>
+        ${statusHtml}
+      </div>`;
+    }).join('');
+    $('t-answers-list').innerHTML=resultHtml||'<div style="color:#666;text-align:center;padding:20px">학생들이 답변 중...</div>';
+
+    if(room.status==='roundend'){
+      showRoundResult(room);
+    }
+    if(room.status==='gameover'){
+      showTeacherFinal(room);
+    }
+  });
+}
+
+function showRoundResult(room){
+  const players=room.players||{};
+  const alive=Object.entries(players).filter(([,p])=>p.alive!==false);
+  if(alive.length<=1){
+    // 게임 종료
+    update(ref(db,`rooms/${state.roomCode}`),{status:'gameover'});
+  }
+}
+
+function showTeacherFinal(room){
+  const players=room.players||{};
+  const winners=Object.values(players).filter(p=>p.alive!==false);
+  $('t-winner-list').innerHTML=winners.map(p=>
+    `<div class="winner-chip">🏆 ${p.name}</div>`
+  ).join('') || '<div style="color:#888">모두 탈락...</div>';
+  showScreen('scr-t-result');
+}
+
+window.nextRound = async function(){
+  const snap=await get(ref(db,`rooms/${state.roomCode}`));
+  const room=snap.val(); if(!room) return;
+  const cur=room.round||1;
+
+  // 답변 초기화, 라운드 증가
+  await update(ref(db,`rooms/${state.roomCode}`),{
+    status:'battle', round:cur+1, answers:null
+  });
+  toast(`라운드 ${cur+1} 시작!`,'info');
+};
+
+window.endGame = async function(){
+  await update(ref(db,`rooms/${state.roomCode}`),{status:'gameover'});
+};
+
+// ── 학생 ─────────────────────────────────────────────
+window.startStudent = function(){
+  state.mode='student';
+  const p=new URLSearchParams(location.search).get('room');
+  if(p) $('join-code').value=p;
+  showScreen('scr-s-join');
+};
+
+window.joinRoom = async function(){
+  const code=$('join-code').value.trim().toUpperCase();
+  const name=$('join-name').value.trim();
+  if(!code||!name){ toast('방 코드와 이름을 입력해주세요!','warn'); return; }
+
+  const snap=await get(ref(db,`rooms/${code}`));
+  if(!snap.exists()){ toast('존재하지 않는 방이에요!','warn'); return; }
+  const room=snap.val();
+  if(room.status!=='lobby'){ toast('이미 시작된 방이에요!','warn'); return; }
+
+  const pid=push(ref(db,`rooms/${code}/players`)).key;
+  await set(ref(db,`rooms/${code}/players/${pid}`),{ name, alive:true, joinedAt:Date.now() });
+
+  state.roomCode=code; state.playerName=name; state.playerId=pid;
+  $('wait-name').textContent=name;
+  showScreen('scr-s-wait');
+  listenAsStudent(code,pid);
+};
+
+function listenAsStudent(code,pid){
+  addListener(`rooms/${code}`, snap=>{
+    const room=snap.val(); if(!room) return;
+    const me=room.players?.[pid];
+
+    if(me?.alive===false){
+      // 탈락 처리
+      $('dead-keyword').textContent=room.keyword;
+      $('dead-pos').textContent=`${POS_EMOJI[room.pos]}${room.pos}`;
+      showScreen('scr-s-dead');
+      return;
+    }
+
+    if(room.status==='battle'){
+      state.currentPos=room.pos;
+      const myAnswer=room.answers?.[pid];
+
+      if(!myAnswer){
+        // 답변 입력 화면
+        $('s-pos-display').textContent=`${POS_EMOJI[room.pos]} ${room.pos}`;
+        $('s-pos-desc').textContent=POS_DESC[room.pos]||'';
+        $('s-keyword-display').textContent=room.keyword;
+        $('s-round-display').textContent=`ROUND ${room.round||1}`;
+        $('s-answer-input').value='';
+        $('s-answer-input').disabled=false;
+        $('s-submit-btn').disabled=false;
+        $('s-submit-btn').textContent='⚔️ 제출!';
+        state.pendingJudge=false;
+        showScreen('scr-s-battle');
+      } else if(myAnswer.status==='judging'||myAnswer.status==='alive'){
+        // 판정 대기 또는 생존
+        $('s-answer-input').disabled=true;
+        $('s-submit-btn').disabled=true;
+        $('s-submit-btn').textContent=myAnswer.status==='alive'?'✅ 생존!':'🤔 판정 중...';
+        showScreen('scr-s-battle');
+      } else if(myAnswer.status==='questioning'){
+        // AI 추가 질문
+        $('q-word').textContent=myAnswer.answer;
+        $('q-question').textContent=myAnswer.question||'이 단어를 선택한 이유가 무엇인가요?';
+        $('q-reason-input').value='';
+        $('q-reason-input').disabled=false;
+        $('q-submit-btn').disabled=false;
+        $('q-submit-btn').textContent='💬 답변 제출';
+        showScreen('scr-s-question');
+      }
+    }
+
+    if(room.status==='gameover'){
+      const players=room.players||{};
+      const winners=Object.values(players).filter(p=>p.alive!==false? false: false).length;
+      const allPlayers=Object.values(players);
+      const aliveOnes=allPlayers.filter(p=>p.alive!==false);
+      const isWinner=me?.alive!==false;
+      $('s-result-icon').textContent=isWinner?'🏆':'💀';
+      $('s-result-msg').textContent=isWinner?'축하해요! 살아남았어요!':'아쉽지만 탈락했어요...';
+      $('s-result-winners').innerHTML=aliveOnes.map(p=>`<div class="winner-chip">🏆 ${p.name}</div>`).join('')||'모두 탈락';
+      showScreen('scr-s-result');
+    }
+  });
+}
+
+window.submitAnswer = async function(){
+  const ans=$('s-answer-input').value.trim();
+  if(!ans){ toast('단어를 입력해주세요!','warn'); return; }
+
+  $('s-answer-input').disabled=true;
+  $('s-submit-btn').disabled=true;
+  $('s-submit-btn').textContent='🤔 판정 중...';
+
+  // Firebase에 저장
+  await set(ref(db,`rooms/${state.roomCode}/answers/${state.playerId}`),{
+    answer:ans, status:'judging', submittedAt:Date.now()
+  });
+
+  // AI 판정 요청
+  judgeAnswer(state.roomCode, state.playerId, ans);
+};
+
+async function judgeAnswer(roomCode, pid, answer){
+  const snap=await get(ref(db,`rooms/${roomCode}`));
+  const room=snap.val(); if(!room) return;
+  const pos=room.pos; const keyword=room.keyword;
+
+  const prompt=`당신은 중학교 국어 교사입니다. 아래 학생의 답변을 판정해주세요.
+
+게임 규칙: 제시어와 관련이 있으면서 지정된 품사에 해당하는 단어를 입력해야 합니다.
+제시어: "${keyword}"
+지정 품사: ${pos} (${POS_DESC[pos]})
+학생 답변: "${answer}"
+
+판정 기준:
+1. 해당 단어가 "${pos}"에 해당하는가?
+2. "${keyword}"와 관련이 있는가?
+
+다음 중 하나로만 응답하세요 (JSON):
+- 명확히 맞는 경우: {"result":"correct","reason":"이유"}
+- 명확히 틀린 경우: {"result":"wrong","reason":"이유"}  
+- 애매한 경우: {"result":"unclear","question":"학생에게 물어볼 질문 (짧게 1문장)"}
+
+JSON만 출력하고 다른 말은 하지 마세요.`;
+
+  try{
+    const res=await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+      { method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({ contents:[{parts:[{text:prompt}]}] }) }
+    );
+    const data=await res.json();
+    let text=data.candidates?.[0]?.content?.parts?.[0]?.text||'{}';
+    text=text.replace(/```json|```/g,'').trim();
+    const parsed=JSON.parse(text);
+
+    if(parsed.result==='correct'){
+      await update(ref(db,`rooms/${roomCode}/answers/${pid}`),{ status:'alive', reason:parsed.reason });
+    } else if(parsed.result==='wrong'){
+      await update(ref(db,`rooms/${roomCode}/answers/${pid}`),{ status:'dead', reason:parsed.reason });
+      await update(ref(db,`rooms/${roomCode}/players/${pid}`),{ alive:false, deathReason:parsed.reason });
+      checkRoundEnd(roomCode);
+    } else {
+      // 애매함 → 추가 질문
+      await update(ref(db,`rooms/${roomCode}/answers/${pid}`),{
+        status:'questioning', question:parsed.question
+      });
+    }
+  } catch(e){
+    // 에러 시 기본 판정: 생존 처리
+    await update(ref(db,`rooms/${roomCode}/answers/${pid}`),{ status:'alive', reason:'판정 오류로 생존 처리' });
+    checkRoundEnd(roomCode);
+  }
+}
+
+window.submitReason = async function(){
+  const reason=$('q-reason-input').value.trim();
+  if(!reason){ toast('이유를 입력해주세요!','warn'); return; }
+
+  $('q-reason-input').disabled=true;
+  $('q-submit-btn').disabled=true;
+  $('q-submit-btn').textContent='🤔 최종 판정 중...';
+
+  const snap=await get(ref(db,`rooms/${state.roomCode}`));
+  const room=snap.val(); if(!room) return;
+  const myAnswer=room.answers?.[state.playerId];
+
+  const prompt=`중학교 국어 품사 게임에서 학생의 추가 설명을 최종 판정해주세요.
+
+제시어: "${room.keyword}"
+지정 품사: ${room.pos} (${POS_DESC[room.pos]})
+학생 답변 단어: "${myAnswer?.answer}"
+AI의 질문: "${myAnswer?.question}"
+학생의 설명: "${reason}"
+
+학생의 설명을 고려했을 때 이 답변을 허용할 수 있는가?
+JSON으로만 응답: {"result":"correct","reason":"이유"} 또는 {"result":"wrong","reason":"이유"}
+JSON만 출력하세요.`;
+
+  try{
+    const res=await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+      { method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({ contents:[{parts:[{text:prompt}]}] }) }
+    );
+    const data=await res.json();
+    let text=data.candidates?.[0]?.content?.parts?.[0]?.text||'{}';
+    text=text.replace(/```json|```/g,'').trim();
+    const parsed=JSON.parse(text);
+
+    if(parsed.result==='correct'){
+      await update(ref(db,`rooms/${state.roomCode}/answers/${state.playerId}`),{
+        status:'alive', reason:parsed.reason, playerReason:reason
+      });
+      showScreen('scr-s-battle');
+      $('s-submit-btn').textContent='✅ 생존!';
+    } else {
+      await update(ref(db,`rooms/${state.roomCode}/answers/${state.playerId}`),{
+        status:'dead', reason:parsed.reason, playerReason:reason
+      });
+      await update(ref(db,`rooms/${state.roomCode}/players/${state.playerId}`),{
+        alive:false, deathReason:parsed.reason
+      });
+      checkRoundEnd(state.roomCode);
+    }
+  } catch(e){
+    await update(ref(db,`rooms/${state.roomCode}/answers/${state.playerId}`),{ status:'alive' });
+    checkRoundEnd(state.roomCode);
+  }
+};
+
+async function checkRoundEnd(roomCode){
+  const snap=await get(ref(db,`rooms/${roomCode}`));
+  const room=snap.val(); if(!room) return;
+  const players=room.players||{};
+  const answers=room.answers||{};
+  const alive=Object.entries(players).filter(([,p])=>p.alive!==false);
+  const pending=Object.entries(answers).filter(([,a])=>a.status==='judging'||a.status==='questioning');
+
+  // 살아있는 모든 플레이어가 판정 완료됐는지 확인
+  const aliveIds=alive.map(([id])=>id);
+  const allJudged=aliveIds.every(id=>answers[id] && answers[id].status!=='judging' && answers[id].status!=='questioning');
+
+  if(allJudged){
+    const nowAlive=Object.entries(players).filter(([,p])=>p.alive!==false);
+    if(nowAlive.length<=1){
+      await update(ref(db,`rooms/${roomCode}`),{status:'gameover'});
+    } else {
+      await update(ref(db,`rooms/${roomCode}`),{status:'roundend'});
+    }
+  }
+}
+
+// ── 초기화 ────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded',()=>{
+  const room=new URLSearchParams(location.search).get('room');
+  if(room){ startStudent(); }
+  else { showScreen('scr-home'); }
+});
+</script>
+
+<style>
+*, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+:root {
+  --bg:     #0a0a0f;
+  --s1:     #12121e;
+  --s2:     #1a1a2e;
+  --red:    #ff2244;
+  --orange: #ff6600;
+  --yellow: #ffcc00;
+  --green:  #00ff88;
+  --blue:   #4488ff;
+  --text:   #f0f0f0;
+  --muted:  #666688;
+  --border: rgba(255,255,255,0.07);
+  --r:      14px;
+}
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap');
+html,body { min-height:100%; background:var(--bg); color:var(--text); font-family:'Noto Sans KR',sans-serif; -webkit-font-smoothing:antialiased; overflow-x:hidden; }
+
+/* 배경 효과 */
+body::before {
+  content:''; position:fixed; inset:0; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(ellipse at 20% 0%, rgba(255,34,68,0.15) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 100%, rgba(68,136,255,0.10) 0%, transparent 50%);
+}
+
+.screen { position:relative; z-index:1; min-height:100vh; padding:20px 16px 48px; max-width:480px; margin:0 auto; display:flex; flex-direction:column; }
+.hidden { display:none !important; }
+
+/* ── 타이틀 ── */
+.main-eyebrow { text-align:center; font-size:0.72rem; color:var(--muted); letter-spacing:3px; text-transform:uppercase; margin-bottom:6px; margin-top:32px; }
+.main-title {
+  font-size:2.6rem; font-weight:900; text-align:center; line-height:1.1;
+  color:#fff; letter-spacing:-1px;
+}
+.main-title .fight { color:var(--red); display:block; font-size:3rem; text-shadow:0 0 30px rgba(255,34,68,0.5); }
+.main-sub { text-align:center; color:var(--muted); font-size:0.82rem; margin-top:6px; margin-bottom:32px; }
+
+/* ── 불꽃 애니메이션 ── */
+.fire { font-size:3rem; text-align:center; margin:8px 0; animation:flicker 1.5s ease-in-out infinite alternate; }
+@keyframes flicker { 0%{transform:scale(1) rotate(-2deg)} 100%{transform:scale(1.08) rotate(2deg)} }
+
+/* ── 버튼 ── */
+.btn { width:100%; padding:16px; border:none; border-radius:var(--r); font-size:1rem; font-weight:700; font-family:inherit; cursor:pointer; transition:all 0.18s; margin-bottom:10px; display:flex; align-items:center; justify-content:center; gap:8px; }
+.btn:active { transform:scale(0.97); }
+.btn-red { background:linear-gradient(135deg,#ff2244,#ff6600); color:#fff; box-shadow:0 4px 20px rgba(255,34,68,0.35); }
+.btn-blue { background:linear-gradient(135deg,#1144ff,#4488ff); color:#fff; box-shadow:0 4px 20px rgba(68,136,255,0.3); }
+.btn-green { background:linear-gradient(135deg,#00aa55,#00ff88); color:#000; box-shadow:0 4px 20px rgba(0,255,136,0.25); }
+.btn-yellow { background:linear-gradient(135deg,#cc8800,#ffcc00); color:#000; box-shadow:0 4px 20px rgba(255,204,0,0.25); }
+.btn-ghost { background:transparent; border:1px solid var(--border); color:var(--muted); box-shadow:none; }
+.btn-ghost:hover { border-color:rgba(255,255,255,0.15); color:var(--text); }
+.btn-sm { padding:10px 16px; font-size:0.88rem; margin-bottom:0; width:auto; }
+
+/* ── 카드 ── */
+.card { background:var(--s1); border:1px solid var(--border); border-radius:var(--r); padding:18px; margin-bottom:14px; }
+.card-red   { border-color:rgba(255,34,68,0.3); background:rgba(255,34,68,0.05); }
+.card-green { border-color:rgba(0,255,136,0.2); background:rgba(0,255,136,0.04); }
+.card-blue  { border-color:rgba(68,136,255,0.2); background:rgba(68,136,255,0.05); }
+.card-yellow{ border-color:rgba(255,204,0,0.25); background:rgba(255,204,0,0.05); }
+
+/* ── 입력 ── */
+.lbl { font-size:0.78rem; color:var(--muted); margin-bottom:6px; display:block; font-weight:700; letter-spacing:1px; text-transform:uppercase; }
+.inp { width:100%; padding:13px 16px; background:var(--s2); border:1px solid var(--border); border-radius:10px; color:var(--text); font-size:1rem; font-family:inherit; outline:none; margin-bottom:12px; transition:border-color 0.2s; }
+.inp:focus { border-color:var(--red); }
+
+/* ── 방 코드 ── */
+.room-code { font-size:3rem; font-weight:900; letter-spacing:10px; text-align:center; color:var(--red); line-height:1; margin:10px 0; text-shadow:0 0 20px rgba(255,34,68,0.4); }
+
+/* ── QR ── */
+.qr-wrap { display:flex; flex-direction:column; align-items:center; gap:8px; background:rgba(255,255,255,0.03); border:1px dashed var(--border); border-radius:12px; padding:16px; }
+.qr-wrap img { width:180px; height:180px; border-radius:10px; border:2px solid var(--red); }
+.qr-url { font-size:0.68rem; color:var(--muted); word-break:break-all; text-align:center; }
+
+/* ── 품사 선택 ── */
+.pos-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:10px; }
+.pos-btn {
+  background:var(--s2); border:1px solid var(--border); border-radius:10px;
+  padding:10px 6px; cursor:pointer; transition:all 0.2s; font-family:inherit;
+  display:flex; flex-direction:column; align-items:center; gap:4px;
+}
+.pos-btn:active { transform:scale(0.96); }
+.pos-btn.selected { border-color:var(--red); background:rgba(255,34,68,0.12); }
+.pos-btn-icon { font-size:1.4rem; }
+.pos-btn-name { font-size:0.8rem; font-weight:700; color:var(--text); }
+#pos-desc-box { font-size:0.8rem; color:var(--muted); background:var(--s2); border-radius:8px; padding:10px 12px; margin-bottom:10px; line-height:1.5; }
+
+/* ── 플레이어 칩 ── */
+.fighter-chip {
+  display:inline-flex; align-items:center; gap:4px;
+  background:var(--s2); border:1px solid var(--border); border-radius:8px;
+  padding:6px 12px; font-size:0.85rem; font-weight:700; margin:3px;
+}
+.fighter-chip.dead { opacity:0.4; border-color:transparent; }
+#player-list { display:flex; flex-wrap:wrap; min-height:32px; }
+
+/* ── 상단바 ── */
+.top-bar { display:flex; align-items:center; gap:10px; margin-bottom:18px; }
+.top-bar h2 { margin-bottom:0; font-size:1.2rem; }
+.back-btn { background:var(--s2); border:1px solid var(--border); border-radius:8px; padding:7px 12px; color:var(--muted); font-size:0.85rem; cursor:pointer; font-family:inherit; font-weight:700; flex-shrink:0; }
+
+/* ── HUD (교사 게임화면) ── */
+.hud { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:14px; }
+.hud-item { background:var(--s1); border:1px solid var(--border); border-radius:10px; padding:10px 14px; }
+.hud-label { font-size:0.7rem; color:var(--muted); letter-spacing:1px; margin-bottom:3px; }
+.hud-value { font-size:1.1rem; font-weight:700; }
+.hud-value.big { font-size:1.4rem; color:var(--red); }
+
+/* ── 진행바 ── */
+.prog-track { background:var(--s2); border-radius:99px; height:6px; overflow:hidden; margin:8px 0 4px; }
+.prog-fill { height:100%; background:linear-gradient(90deg,var(--red),var(--orange)); border-radius:99px; transition:width 0.4s; width:0%; }
+.prog-txt { font-size:0.8rem; color:var(--muted); text-align:right; }
+
+/* ── 답변 목록 ── */
+.answer-item { display:flex; align-items:center; gap:8px; padding:10px 14px; border-radius:10px; background:var(--s2); margin-bottom:6px; font-size:0.9rem; }
+.answer-item.dead-row { opacity:0.4; }
+.ans-name { font-weight:700; min-width:60px; }
+.ans-word { flex:1; color:var(--yellow); font-weight:700; }
+.judge-status { font-size:0.78rem; padding:3px 10px; border-radius:99px; font-weight:700; white-space:nowrap; }
+.judge-status.judging    { background:rgba(255,204,0,0.15); color:var(--yellow); }
+.judge-status.alive      { background:rgba(0,255,136,0.15); color:var(--green); }
+.judge-status.questioning{ background:rgba(68,136,255,0.15); color:var(--blue); }
+.judge-status.dead       { background:rgba(255,34,68,0.15); color:var(--red); }
+
+/* ── 학생 배틀 화면 ── */
+.battle-header { text-align:center; padding:16px 0 20px; }
+.round-badge {
+  display:inline-block; background:linear-gradient(135deg,var(--red),var(--orange));
+  color:#fff; font-size:0.75rem; font-weight:700; padding:4px 16px;
+  border-radius:99px; letter-spacing:2px; margin-bottom:12px;
+}
+.battle-pos { font-size:2rem; font-weight:900; margin-bottom:4px; }
+.battle-keyword-label { font-size:0.78rem; color:var(--muted); margin-bottom:6px; }
+.battle-keyword { font-size:2.6rem; font-weight:900; color:var(--yellow); text-shadow:0 0 20px rgba(255,204,0,0.3); letter-spacing:3px; }
+.pos-hint { font-size:0.78rem; color:var(--muted); background:var(--s2); border-radius:8px; padding:8px 12px; margin:12px 0; line-height:1.5; }
+
+/* ── 큰 입력 ── */
+.big-input { font-size:1.6rem; font-weight:700; text-align:center; letter-spacing:2px; background:var(--s2); border:2px solid var(--border); border-radius:12px; color:var(--text); padding:16px; width:100%; font-family:inherit; outline:none; transition:border-color 0.2s; margin-bottom:12px; }
+.big-input:focus { border-color:var(--red); box-shadow:0 0 16px rgba(255,34,68,0.15); }
+
+/* ── 대기 ── */
+.wait-screen { text-align:center; padding-top:60px; }
+.wait-pulse { font-size:4rem; animation:pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.12)} }
+
+/* ── 탈락 화면 ── */
+.dead-screen { text-align:center; padding-top:40px; }
+.skull-big { font-size:5rem; animation:shake 0.5s ease-in-out 3; }
+@keyframes shake { 0%,100%{transform:rotate(0)} 25%{transform:rotate(-8deg)} 75%{transform:rotate(8deg)} }
+
+/* ── 결과 ── */
+.winner-chip { display:inline-block; background:linear-gradient(135deg,var(--orange),var(--yellow)); color:#000; border-radius:10px; padding:8px 18px; font-size:1rem; font-weight:700; margin:4px; }
+
+/* ── 질문 화면 ── */
+.question-card { background:rgba(68,136,255,0.08); border:1px solid rgba(68,136,255,0.3); border-radius:14px; padding:18px; margin-bottom:14px; }
+.q-word { font-size:1.6rem; font-weight:900; color:var(--yellow); text-align:center; margin:8px 0 4px; }
+.q-label { font-size:0.75rem; color:var(--muted); text-align:center; margin-bottom:14px; }
+.q-text { font-size:0.92rem; color:var(--blue); line-height:1.6; text-align:center; }
+
+/* ── 뱃지 ── */
+.badge { display:inline-block; background:rgba(255,34,68,0.2); color:var(--red); border:1px solid rgba(255,34,68,0.3); border-radius:99px; padding:2px 12px; font-size:0.78rem; font-weight:700; }
+
+/* ── 토스트 ── */
+.toast { position:fixed; bottom:32px; left:50%; transform:translateX(-50%) translateY(20px); background:var(--s1); border:1px solid var(--border); color:var(--text); padding:10px 22px; border-radius:24px; font-size:0.88rem; font-weight:700; opacity:0; transition:all 0.3s; white-space:nowrap; z-index:9999; }
+.toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+.toast.toast-warn { border-color:rgba(255,204,0,0.4); color:var(--yellow); }
+.toast.toast-info { border-color:rgba(68,136,255,0.4); color:var(--blue); }
+
+/* ── 구분선 ── */
+hr.div { border:none; border-top:1px solid var(--border); margin:14px 0; }
+.info-row { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border); font-size:0.88rem; }
+.info-row:last-child { border-bottom:none; }
+.info-key { color:var(--muted); }
+.scroll-area { overflow-y:auto; flex:1; max-height:50vh; }
+</style>
+</head>
+<body>
+
+<!-- ══════ 홈 ══════ -->
+<div id="scr-home" class="screen">
+  <div class="main-eyebrow">류봉두와 함께하는 국어수업</div>
+  <div class="fire">🔥</div>
+  <div class="main-title">
+    대결!
+    <span class="fight">품사 파이터!</span>
+  </div>
+  <div class="main-sub">품사를 알아야 살아남는다</div>
+
+  <div style="margin-top:24px">
+    <button class="btn btn-red" onclick="startTeacher()">👩‍🏫 선생님 — 방 만들기</button>
+    <button class="btn btn-blue" onclick="startStudent()">⚔️ 학생 — 전투 참가</button>
+  </div>
+
+  <div class="card" style="margin-top:16px;text-align:center">
+    <div style="font-size:0.8rem;color:var(--muted);line-height:1.8">
+      품사에 맞는 단어를 입력해라<br>
+      AI가 판정한다 · 틀리면 탈락 · 끝까지 살아남아라
+    </div>
+  </div>
+</div>
+
+<!-- ══════ 교사: 방 설정 ══════ -->
+<div id="scr-t-setup" class="screen hidden">
+  <div class="top-bar">
+    <button class="back-btn" onclick="goHome()">← 뒤로</button>
+    <h2>⚔️ 전투 설정</h2>
+  </div>
+
+  <div class="card">
+    <div class="lbl">🎯 품사 선택 (오늘의 주제)</div>
+    <div class="pos-grid" id="pos-selector"></div>
+    <div id="pos-desc-box" class="hidden"></div>
+  </div>
+
+  <div class="card">
+    <label class="lbl">📢 제시어 입력</label>
+    <input id="keyword-input" class="inp" placeholder="예: 학교, 여름, 바다..." maxlength="10">
+    <div style="font-size:0.78rem;color:var(--muted)">학생들은 이 단어와 관련된 단어를 해당 품사로 입력해요</div>
+  </div>
+
+  <button id="btn-create" class="btn btn-red" onclick="createRoom()">🚪 방 만들기</button>
+  <button class="btn btn-ghost" onclick="goHome()">취소</button>
+</div>
+
+<!-- ══════ 교사: 로비 ══════ -->
+<div id="scr-t-lobby" class="screen hidden">
+  <div class="top-bar">
+    <button class="back-btn" onclick="goHome()">← 종료</button>
+    <h2>⏳ 대기실</h2>
+  </div>
+
+  <div class="card" style="text-align:center">
+    <div style="font-size:0.78rem;color:var(--muted);margin-bottom:4px">방 코드</div>
+    <div class="room-code" id="room-code-display">-----</div>
+  </div>
+
+  <div class="card">
+    <div class="qr-wrap">
+      <img id="qr-img" src="" alt="QR">
+      <div class="qr-url" id="join-url"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="info-row"><span class="info-key">오늘의 품사</span><span id="lobby-pos" style="font-weight:700"></span></div>
+    <div class="info-row"><span class="info-key">제시어</span><span id="lobby-keyword" style="color:var(--yellow);font-weight:700"></span></div>
+    <div class="info-row"><span class="info-key">참가자</span><span class="badge" id="player-count">0</span></div>
+  </div>
+
+  <div id="player-list" style="margin-bottom:14px"></div>
+
+  <button class="btn btn-red" onclick="startBattle()">⚔️ 전투 시작!</button>
+</div>
+
+<!-- ══════ 교사: 게임 진행 ══════ -->
+<div id="scr-t-game" class="screen hidden">
+  <div class="top-bar">
+    <button class="back-btn" onclick="goHome()">← 종료</button>
+    <h2 id="t-round-display">라운드 1</h2>
+    <span class="badge" id="t-alive-count"></span>
+  </div>
+
+  <div class="hud">
+    <div class="hud-item">
+      <div class="hud-label">품사</div>
+      <div class="hud-value" id="t-pos-display"></div>
+    </div>
+    <div class="hud-item">
+      <div class="hud-label">제시어</div>
+      <div class="hud-value big" id="t-keyword-display"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="prog-track"><div class="prog-fill" id="t-ans-bar"></div></div>
+    <div class="prog-txt" id="t-ans-progress">0 / 0명 제출</div>
+  </div>
+
+  <div class="card scroll-area">
+    <div id="t-answers-list"></div>
+  </div>
+
+  <button class="btn btn-yellow" onclick="nextRound()" style="margin-top:8px">▶ 다음 라운드</button>
+  <button class="btn btn-ghost btn-sm" onclick="endGame()" style="width:100%;margin-top:4px">🏁 게임 종료</button>
+</div>
+
+<!-- ══════ 교사: 최종 결과 ══════ -->
+<div id="scr-t-result" class="screen hidden">
+  <div style="text-align:center;padding:32px 0 20px">
+    <div style="font-size:3.5rem;margin-bottom:12px">🏆</div>
+    <div style="font-size:1.8rem;font-weight:900;margin-bottom:8px">최후의 파이터!</div>
+    <div id="t-winner-list" style="margin-top:16px"></div>
+  </div>
+  <button class="btn btn-red" onclick="goHome()" style="margin-top:24px">🏠 홈으로</button>
+</div>
+
+<!-- ══════ 학생: 입장 ══════ -->
+<div id="scr-s-join" class="screen hidden">
+  <div style="margin-top:24px;text-align:center">
+    <div class="fire">⚔️</div>
+    <div class="main-title" style="font-size:2rem">대결!<span class="fight" style="font-size:2.2rem">품사 파이터!</span></div>
+  </div>
+  <div class="card" style="margin-top:20px">
+    <label class="lbl">방 코드</label>
+    <input id="join-code" class="inp" placeholder="예: AB1C2" maxlength="5" style="text-transform:uppercase;letter-spacing:6px;font-size:1.5rem;font-weight:900;text-align:center">
+    <label class="lbl">닉네임</label>
+    <input id="join-name" class="inp" placeholder="전사 이름 입력" maxlength="8">
+  </div>
+  <button class="btn btn-red" onclick="joinRoom()">⚔️ 전투 참가!</button>
+  <button class="btn btn-ghost" onclick="goHome()">← 뒤로</button>
+</div>
+
+<!-- ══════ 학생: 대기 ══════ -->
+<div id="scr-s-wait" class="screen hidden">
+  <div class="wait-screen">
+    <div class="wait-pulse">⚔️</div>
+    <div style="font-size:1.3rem;font-weight:700;margin:16px 0 8px"><span id="wait-name"></span> 전사!</div>
+    <div style="color:var(--muted);font-size:0.9rem">선생님이 전투를 시작하길 기다리는 중...</div>
+    <div class="card card-red" style="margin-top:32px;text-align:left">
+      <div style="font-size:0.85rem;line-height:1.9">
+        ⚔️ <b>전투 규칙</b><br>
+        선생님이 품사와 제시어를 정해요<br>
+        제시어와 관련된 단어를 해당 품사로 입력!<br>
+        AI가 판정 — 틀리면 즉시 탈락 💀<br>
+        애매하면 AI가 이유를 물어봐요<br>
+        마지막까지 살아남은 자가 승리! 🏆
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ 학생: 배틀 ══════ -->
+<div id="scr-s-battle" class="screen hidden">
+  <div class="battle-header">
+    <div class="round-badge" id="s-round-display">ROUND 1</div>
+    <div class="battle-pos" id="s-pos-display">🏷️ 명사</div>
+    <div class="battle-keyword-label">제시어</div>
+    <div class="battle-keyword" id="s-keyword-display">학교</div>
+  </div>
+
+  <div class="pos-hint" id="s-pos-desc"></div>
+
+  <input id="s-answer-input" class="big-input" placeholder="단어 입력..." maxlength="15">
+
+  <button id="s-submit-btn" class="btn btn-red" onclick="submitAnswer()">⚔️ 제출!</button>
+
+  <div class="card" style="margin-top:8px;font-size:0.78rem;color:var(--muted);text-align:center;line-height:1.7">
+    입력한 단어가 제시어와 관련 있고<br>지정된 품사에 해당해야 생존해요
+  </div>
+</div>
+
+<!-- ══════ 학생: AI 추가 질문 ══════ -->
+<div id="scr-s-question" class="screen hidden">
+  <div style="text-align:center;margin:24px 0 16px">
+    <div style="font-size:2rem;margin-bottom:8px">🤔</div>
+    <div style="font-size:1rem;font-weight:700;color:var(--blue)">AI가 추가 질문을 했어요!</div>
+  </div>
+
+  <div class="question-card">
+    <div style="font-size:0.75rem;color:var(--muted);text-align:center;margin-bottom:4px">입력한 단어</div>
+    <div class="q-word" id="q-word"></div>
+    <div class="q-label">AI의 질문</div>
+    <div class="q-text" id="q-question"></div>
+  </div>
+
+  <div class="card">
+    <label class="lbl">💬 이유를 설명해주세요</label>
+    <input id="q-reason-input" class="inp" placeholder="왜 이 단어를 골랐나요?" maxlength="50">
+    <div style="font-size:0.75rem;color:var(--muted)">설명이 납득되면 AI가 허용해줄 수 있어요!</div>
+  </div>
+
+  <button id="q-submit-btn" class="btn btn-blue" onclick="submitReason()">💬 답변 제출</button>
+</div>
+
+<!-- ══════ 학생: 탈락 ══════ -->
+<div id="scr-s-dead" class="screen hidden">
+  <div class="dead-screen">
+    <div class="skull-big">💀</div>
+    <div style="font-size:1.8rem;font-weight:900;color:var(--red);margin:16px 0 8px">탈락!</div>
+    <div style="color:var(--muted);font-size:0.9rem;margin-bottom:24px">아쉽지만 전투에서 쓰러졌어요</div>
+
+    <div class="card" style="text-align:left">
+      <div class="info-row"><span class="info-key">제시어</span><span id="dead-keyword" style="color:var(--yellow);font-weight:700"></span></div>
+      <div class="info-row"><span class="info-key">요구 품사</span><span id="dead-pos" style="font-weight:700"></span></div>
+    </div>
+
+    <div class="card card-red" style="font-size:0.85rem;line-height:1.8;text-align:left;margin-top:8px">
+      다른 친구들의 전투를 관전하면서<br>품사를 공부해봐요! 📚<br>
+      다음엔 반드시 살아남을 수 있어요 💪
+    </div>
+
+    <button class="btn btn-ghost" style="margin-top:16px" onclick="goHome()">🏠 홈으로</button>
+  </div>
+</div>
+
+<!-- ══════ 학생: 최종 결과 ══════ -->
+<div id="scr-s-result" class="screen hidden">
+  <div style="text-align:center;padding:40px 0 20px">
+    <div style="font-size:4rem;margin-bottom:12px" id="s-result-icon">🏆</div>
+    <div style="font-size:1.5rem;font-weight:900;margin-bottom:6px" id="s-result-msg"></div>
+    <div style="color:var(--muted);font-size:0.85rem;margin-bottom:24px">최후의 파이터</div>
+    <div id="s-result-winners"></div>
+  </div>
+  <button class="btn btn-ghost" style="margin-top:16px" onclick="goHome()">🏠 홈으로</button>
+</div>
+
+</body>
+</html>
